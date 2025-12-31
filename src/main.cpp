@@ -5,8 +5,22 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+#include <fstream>
+#include <sstream>
+#include <string>
 #include <iostream>
 #include <string>
+#include <pybind11/embed.h>
+#include <pybind11/stl.h>
+namespace py = pybind11;
+
+
+static std::string read_text_file(const std::string& path) {
+    std::ifstream in(path);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
 
 static void glfw_error_callback(int err, const char* msg) {
   std::cerr << "GLFW error " << err << ": " << msg << "\n";
@@ -56,7 +70,93 @@ static GLuint linkProgram(GLuint vs, GLuint fs) {
   return p;
 }
 
+static GLuint createProgram(std::string vsPath, std::string fsPath){
+    std::string vsString = read_text_file(vsPath);
+    const char* vsSrc = vsString.c_str();
+    std::string fsString = read_text_file(fsPath);
+    const char* fsSrc = fsString.c_str();
+    return linkProgram(compileShader(GL_VERTEX_SHADER, vsSrc),
+                              compileShader(GL_FRAGMENT_SHADER, fsSrc));
+}
+
+struct RenderObj{
+    GLuint prog;
+    GLuint vao, vbo;
+    int vertex_count;
+    glm::mat4 model;
+    glm::vec3 objectColor;
+};
+
+static RenderObj create_render_object(GLuint prog, py::dict globals, std::string modelPath){
+    std::vector<float> vertices = globals["load_obj"](modelPath).cast<std::vector<float>>();
+    GLuint vao=0, vbo=0;
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_STATIC_DRAW);
+
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+    RenderObj renderObj;
+    renderObj.prog = prog;
+    renderObj.vao = vao;
+    renderObj.vbo = vbo;
+    renderObj.vertex_count = vertices.size() / 6;
+    return renderObj;
+}
+
+static void render_object(RenderObj renderObj, glm::mat4 view, glm::mat4 proj, glm::vec3 lightPos, glm::vec3 camPos){
+    glUseProgram(renderObj.prog);
+    const GLint locModel = glGetUniformLocation(renderObj.prog, "uModel");
+    const GLint locView  = glGetUniformLocation(renderObj.prog, "uView");
+    const GLint locProj  = glGetUniformLocation(renderObj.prog, "uProj");
+    const GLint locLightPos = glGetUniformLocation(renderObj.prog, "uLightPos");
+    const GLint locViewPos  = glGetUniformLocation(renderObj.prog, "uViewPos");
+    const GLint locObjCol   = glGetUniformLocation(renderObj.prog, "uObjectColor");
+    const GLint locLightCol = glGetUniformLocation(renderObj.prog, "uLightColor");
+
+    glUniformMatrix4fv(locModel, 1, GL_FALSE, glm::value_ptr(renderObj.model));
+    glUniformMatrix4fv(locView,  1, GL_FALSE, glm::value_ptr(view));
+    glUniformMatrix4fv(locProj,  1, GL_FALSE, glm::value_ptr(proj));
+
+    glUniform3fv(locLightPos, 1, glm::value_ptr(lightPos));
+    glUniform3fv(locViewPos,  1, glm::value_ptr(camPos));
+
+    glm::vec3 lightColor (1.0f, 1.0f, 1.0f);
+    glUniform3fv(locObjCol,   1, glm::value_ptr(renderObj.objectColor));
+    glUniform3fv(locLightCol, 1, glm::value_ptr(lightColor));
+
+    glBindVertexArray(renderObj.vao);
+    glDrawArrays(GL_TRIANGLES, 0, renderObj.vertex_count);
+}
+
+static void delete_object(RenderObj renderObj){
+    glDeleteProgram(renderObj.prog);
+    glDeleteBuffers(1, &renderObj.vbo);
+    glDeleteVertexArrays(1, &renderObj.vao);
+}
+
+static glm::mat4 trs(glm::vec3 position, float angleRadians, glm::vec3 scale){
+    glm::mat4 matrix = glm::mat4(1.0f);
+    matrix = glm::translate(matrix, position);
+    matrix = glm::rotate(matrix, angleRadians, glm::vec3(0.0,1.0,0.0));
+    matrix = glm::scale(matrix, scale);
+    return matrix;
+}
+
 int main() {
+    py::scoped_interpreter guard{};  // start Python
+    py::dict globals;
+    globals["__builtins__"] = py::module_::import("builtins");
+    std::string code = read_text_file("assets/python_src/load_obj.py");
+    std::cout << code << std::endl;
+    py::exec(code, globals);
+
+
   glfwSetErrorCallback(glfw_error_callback);
   if (!glfwInit()) return 1;
 
@@ -65,7 +165,7 @@ int main() {
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
   glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-  GLFWwindow* win = glfwCreateWindow(1280, 720, "Lit Cube (GLM)", nullptr, nullptr);
+  GLFWwindow* win = glfwCreateWindow(1280, 720, "Models", nullptr, nullptr);
   if (!win) {
     glfwTerminate();
     return 1;
@@ -83,142 +183,16 @@ int main() {
 
   glEnable(GL_DEPTH_TEST);
 
-  // Interleaved position + normal (36 vertices, cube)
-  const float vertices[] = {
-    // pos                // normal
-    -0.5f,-0.5f,-0.5f,    0.0f, 0.0f,-1.0f,
-     0.5f,-0.5f,-0.5f,    0.0f, 0.0f,-1.0f,
-     0.5f, 0.5f,-0.5f,    0.0f, 0.0f,-1.0f,
-     0.5f, 0.5f,-0.5f,    0.0f, 0.0f,-1.0f,
-    -0.5f, 0.5f,-0.5f,    0.0f, 0.0f,-1.0f,
-    -0.5f,-0.5f,-0.5f,    0.0f, 0.0f,-1.0f,
+  GLuint prog = createProgram("assets/shaders/lit_shader.vs", "assets/shaders/lit_shader.fs");
+  RenderObj icoSphere = create_render_object(prog, globals, "assets/models/Planet.obj");
+  RenderObj funnyThing = create_render_object(prog, globals, "assets/models/funnything.obj");
+  RenderObj buildings = create_render_object(prog, globals, "assets/models/buildings.obj");
 
-    -0.5f,-0.5f, 0.5f,    0.0f, 0.0f, 1.0f,
-     0.5f,-0.5f, 0.5f,    0.0f, 0.0f, 1.0f,
-     0.5f, 0.5f, 0.5f,    0.0f, 0.0f, 1.0f,
-     0.5f, 0.5f, 0.5f,    0.0f, 0.0f, 1.0f,
-    -0.5f, 0.5f, 0.5f,    0.0f, 0.0f, 1.0f,
-    -0.5f,-0.5f, 0.5f,    0.0f, 0.0f, 1.0f,
-
-    -0.5f, 0.5f, 0.5f,   -1.0f, 0.0f, 0.0f,
-    -0.5f, 0.5f,-0.5f,   -1.0f, 0.0f, 0.0f,
-    -0.5f,-0.5f,-0.5f,   -1.0f, 0.0f, 0.0f,
-    -0.5f,-0.5f,-0.5f,   -1.0f, 0.0f, 0.0f,
-    -0.5f,-0.5f, 0.5f,   -1.0f, 0.0f, 0.0f,
-    -0.5f, 0.5f, 0.5f,   -1.0f, 0.0f, 0.0f,
-
-     0.5f, 0.5f, 0.5f,    1.0f, 0.0f, 0.0f,
-     0.5f, 0.5f,-0.5f,    1.0f, 0.0f, 0.0f,
-     0.5f,-0.5f,-0.5f,    1.0f, 0.0f, 0.0f,
-     0.5f,-0.5f,-0.5f,    1.0f, 0.0f, 0.0f,
-     0.5f,-0.5f, 0.5f,    1.0f, 0.0f, 0.0f,
-     0.5f, 0.5f, 0.5f,    1.0f, 0.0f, 0.0f,
-
-    -0.5f,-0.5f,-0.5f,    0.0f,-1.0f, 0.0f,
-     0.5f,-0.5f,-0.5f,    0.0f,-1.0f, 0.0f,
-     0.5f,-0.5f, 0.5f,    0.0f,-1.0f, 0.0f,
-     0.5f,-0.5f, 0.5f,    0.0f,-1.0f, 0.0f,
-    -0.5f,-0.5f, 0.5f,    0.0f,-1.0f, 0.0f,
-    -0.5f,-0.5f,-0.5f,    0.0f,-1.0f, 0.0f,
-
-    -0.5f, 0.5f,-0.5f,    0.0f, 1.0f, 0.0f,
-     0.5f, 0.5f,-0.5f,    0.0f, 1.0f, 0.0f,
-     0.5f, 0.5f, 0.5f,    0.0f, 1.0f, 0.0f,
-     0.5f, 0.5f, 0.5f,    0.0f, 1.0f, 0.0f,
-    -0.5f, 0.5f, 0.5f,    0.0f, 1.0f, 0.0f,
-    -0.5f, 0.5f,-0.5f,    0.0f, 1.0f, 0.0f,
-  };
-
-  GLuint vao=0, vbo=0;
-  glGenVertexArrays(1, &vao);
-  glGenBuffers(1, &vbo);
-
-  glBindVertexArray(vao);
-  glBindBuffer(GL_ARRAY_BUFFER, vbo);
-  glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-
-  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
-  glEnableVertexAttribArray(0);
-  glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
-  glEnableVertexAttribArray(1);
-
-  const char* vsSrc = R"GLSL(
-    #version 330 core
-    layout (location=0) in vec3 aPos;
-    layout (location=1) in vec3 aNormal;
-
-    uniform mat4 uModel;
-    uniform mat4 uView;
-    uniform mat4 uProj;
-
-    out vec3 vWorldPos;
-    out vec3 vNormal;
-
-    void main() {
-      vec4 world = uModel * vec4(aPos, 1.0);
-      vWorldPos = world.xyz;
-
-      // correct normal transform
-      vNormal = mat3(transpose(inverse(uModel))) * aNormal;
-
-      gl_Position = uProj * uView * world;
-    }
-  )GLSL";
-
-  const char* fsSrc = R"GLSL(
-    #version 330 core
-    out vec4 FragColor;
-
-    in vec3 vWorldPos;
-    in vec3 vNormal;
-
-    uniform vec3 uLightPos;
-    uniform vec3 uViewPos;
-
-    uniform vec3 uObjectColor;
-    uniform vec3 uLightColor;
-
-    void main() {
-      vec3 N = normalize(vNormal);
-      vec3 L = normalize(uLightPos - vWorldPos);
-
-      // ambient
-      float ambientStrength = 0.15;
-      vec3 ambient = ambientStrength * uLightColor;
-
-      // diffuse
-      float diff = max(dot(N, L), 0.0);
-      vec3 diffuse = diff * uLightColor;
-
-      // specular (Blinn-Phong)
-      vec3 V = normalize(uViewPos - vWorldPos);
-      vec3 H = normalize(L + V);
-      float spec = pow(max(dot(N, H), 0.0), 64.0);
-      float specStrength = 0.6;
-      vec3 specular = specStrength * spec * uLightColor;
-
-      vec3 color = (ambient + diffuse + specular) * uObjectColor;
-      FragColor = vec4(color, 1.0);
-    }
-  )GLSL";
-
-  GLuint prog = linkProgram(compileShader(GL_VERTEX_SHADER, vsSrc),
-                            compileShader(GL_FRAGMENT_SHADER, fsSrc));
-
-  // Uniform locations (cache once)
   glUseProgram(prog);
-  const GLint locModel = glGetUniformLocation(prog, "uModel");
-  const GLint locView  = glGetUniformLocation(prog, "uView");
-  const GLint locProj  = glGetUniformLocation(prog, "uProj");
-  const GLint locLightPos = glGetUniformLocation(prog, "uLightPos");
-  const GLint locViewPos  = glGetUniformLocation(prog, "uViewPos");
-  const GLint locObjCol   = glGetUniformLocation(prog, "uObjectColor");
-  const GLint locLightCol = glGetUniformLocation(prog, "uLightColor");
 
   // Basic “camera”
-  glm::vec3 camPos   = glm::vec3(1.8f, 1.4f, 2.2f);
-  glm::vec3 camTarget= glm::vec3(0.0f, 0.0f, 0.0f);
-  glm::vec3 camUp    = glm::vec3(0.0f, 1.0f, 0.0f);
+  glm::vec3 camTarget = glm::vec3(0.0f, 0.0f, 0.0f);
+  glm::vec3 camUp = glm::vec3(0.0f, 1.0f, 0.0f);
 
   glm::vec3 lightPos = glm::vec3(1.2f, 1.5f, 1.0f);
 
@@ -235,37 +209,28 @@ int main() {
 
     // Animate a little
     float t = (float)glfwGetTime();
+    glm::vec3 camPos   = glm::vec3(cos(t)*3, 2.2f, sin(t)*3);
 
-    glm::mat4 model(1.0f);
-    model = glm::rotate(model, t * 0.8f, glm::vec3(0.3f, 1.0f, 0.1f));
+    icoSphere.model = trs(glm::vec3(-1.0,0.0,0.0), 0, glm::vec3(0.2,0.2,0.2));
+    icoSphere.objectColor = glm::vec3(0.9f, 0.55f, 0.2f);
+
+    funnyThing.model = trs(glm::vec3(1.0,0.0,0.0), 0, glm::vec3(0.2,0.2,0.2));
+    funnyThing.objectColor = glm::vec3(0.2f, 0.55f, 0.9f);
+
+    buildings.model = trs(glm::vec3(0.0,-0.6,0.0), 0, glm::vec3(0.2,0.2,0.2));
+    buildings.objectColor = glm::vec3(0.2f, 0.9f, 0.2f);
 
     glm::mat4 view = glm::lookAt(camPos, camTarget, camUp);
     glm::mat4 proj = glm::perspective(glm::radians(60.0f), aspect, 0.1f, 100.0f);
-
-    glUseProgram(prog);
-    glUniformMatrix4fv(locModel, 1, GL_FALSE, glm::value_ptr(model));
-    glUniformMatrix4fv(locView,  1, GL_FALSE, glm::value_ptr(view));
-    glUniformMatrix4fv(locProj,  1, GL_FALSE, glm::value_ptr(proj));
-
-    // light slowly orbits
     glm::vec3 animLight = lightPos + glm::vec3(std::cos(t) * 0.4f, 0.0f, std::sin(t) * 0.4f);
-    glUniform3fv(locLightPos, 1, glm::value_ptr(animLight));
-    glUniform3fv(locViewPos,  1, glm::value_ptr(camPos));
 
-    glm::vec3 objectColor(0.2f, 0.55f, 0.9f);
-    glm::vec3 lightColor (1.0f, 1.0f, 1.0f);
-    glUniform3fv(locObjCol,   1, glm::value_ptr(objectColor));
-    glUniform3fv(locLightCol, 1, glm::value_ptr(lightColor));
-
-    glBindVertexArray(vao);
-    glDrawArrays(GL_TRIANGLES, 0, 36);
+    render_object(icoSphere, view, proj, animLight, camPos);
+    render_object(funnyThing, view, proj, animLight, camPos);
+    render_object(buildings, view, proj, animLight, camPos);
 
     glfwSwapBuffers(win);
   }
-
-  glDeleteProgram(prog);
-  glDeleteBuffers(1, &vbo);
-  glDeleteVertexArrays(1, &vao);
+  delete_object(icoSphere);
 
   glfwDestroyWindow(win);
   glfwTerminate();
