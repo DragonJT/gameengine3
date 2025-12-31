@@ -5,15 +5,106 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+#include <string>
+#include <vector>
 #include <fstream>
 #include <sstream>
-#include <string>
 #include <iostream>
-#include <string>
-#include <pybind11/embed.h>
-#include <pybind11/stl.h>
-namespace py = pybind11;
 
+static std::vector<float> load_obj(const std::string& path)
+{
+    std::vector<float> out;   // flat list: px py pz nx ny nz
+    std::vector<std::array<float, 3>> verts;
+    std::vector<std::array<float, 3>> norms;
+
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        std::cerr << "Failed to open OBJ file: " << path << std::endl;
+        return out;
+    }
+
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == '#')
+            continue;
+
+        std::istringstream iss(line);
+        std::string type;
+        iss >> type;
+
+        if (type == "v") {
+            float x, y, z;
+            iss >> x >> y >> z;
+            verts.push_back({x, y, z});
+        }
+        else if (type == "vn") {
+            float x, y, z;
+            iss >> x >> y >> z;
+            norms.push_back({x, y, z});
+        }
+        else if (type == "f") {
+            std::vector<std::string> face;
+            std::string tok;
+            while (iss >> tok)
+                face.push_back(tok);
+
+            if (face.size() < 3)
+                continue;
+
+            auto parse_tok = [](const std::string& t) {
+                int vi = -1;
+                int ni = -1;
+
+                std::stringstream ss(t);
+                std::string part;
+
+                std::getline(ss, part, '/');
+                vi = std::stoi(part) - 1;
+
+                // skip vt
+                if (std::getline(ss, part, '/')) {
+                    if (std::getline(ss, part, '/')) {
+                        if (!part.empty())
+                            ni = std::stoi(part) - 1;
+                    }
+                }
+                return std::pair<int, int>(vi, ni);
+            };
+
+            auto [v0i, n0i] = parse_tok(face[0]);
+
+            // triangulate using fan method
+            for (size_t i = 1; i + 1 < face.size(); ++i) {
+                auto [v1i, n1i] = parse_tok(face[i]);
+                auto [v2i, n2i] = parse_tok(face[i + 1]);
+
+                int vis[3] = {v0i, v1i, v2i};
+                int nis[3] = {n0i, n1i, n2i};
+
+                for (int k = 0; k < 3; ++k) {
+                    const auto& p = verts[vis[k]];
+                    float nx = 0.f, ny = 0.f, nz = 0.f;
+
+                    if (nis[k] >= 0 && nis[k] < (int)norms.size()) {
+                        const auto& n = norms[nis[k]];
+                        nx = n[0];
+                        ny = n[1];
+                        nz = n[2];
+                    }
+
+                    out.push_back(p[0]);
+                    out.push_back(p[1]);
+                    out.push_back(p[2]);
+                    out.push_back(nx);
+                    out.push_back(ny);
+                    out.push_back(nz);
+                }
+            }
+        }
+    }
+
+    return out;
+}
 
 static std::string read_text_file(const std::string& path) {
     std::ifstream in(path);
@@ -87,8 +178,8 @@ struct RenderObj{
     glm::vec3 objectColor;
 };
 
-static RenderObj create_render_object(GLuint prog, py::dict globals, std::string modelPath){
-    std::vector<float> vertices = globals["load_obj"](modelPath).cast<std::vector<float>>();
+static RenderObj create_render_object(GLuint prog, std::string modelPath){
+    std::vector<float> vertices = load_obj(modelPath);
     GLuint vao=0, vbo=0;
     glGenVertexArrays(1, &vao);
     glGenBuffers(1, &vbo);
@@ -149,14 +240,6 @@ static glm::mat4 trs(glm::vec3 position, float angleRadians, glm::vec3 scale){
 }
 
 int main() {
-    py::scoped_interpreter guard{};  // start Python
-    py::dict globals;
-    globals["__builtins__"] = py::module_::import("builtins");
-    std::string code = read_text_file("assets/python_src/load_obj.py");
-    std::cout << code << std::endl;
-    py::exec(code, globals);
-
-
   glfwSetErrorCallback(glfw_error_callback);
   if (!glfwInit()) return 1;
 
@@ -184,9 +267,9 @@ int main() {
   glEnable(GL_DEPTH_TEST);
 
   GLuint prog = createProgram("assets/shaders/lit_shader.vs", "assets/shaders/lit_shader.fs");
-  RenderObj icoSphere = create_render_object(prog, globals, "assets/models/Planet.obj");
-  RenderObj funnyThing = create_render_object(prog, globals, "assets/models/funnything.obj");
-  RenderObj buildings = create_render_object(prog, globals, "assets/models/buildings.obj");
+  RenderObj icoSphere = create_render_object(prog, "assets/models/Planet.obj");
+  RenderObj funnyThing = create_render_object(prog, "assets/models/funnything.obj");
+  RenderObj buildings = create_render_object(prog, "assets/models/buildings.obj");
 
   glUseProgram(prog);
 

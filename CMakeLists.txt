@@ -3,25 +3,26 @@ project(mygl LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-find_package(OpenGL REQUIRED)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_library(glad STATIC external/glad/src/glad.c)
 target_include_directories(glad PUBLIC external/glad/include)
 
 add_subdirectory(external/glfw)
 add_subdirectory(external/glm)
-add_subdirectory(external/pybind11)
 
 add_executable(mygl src/main.cpp)
 
 target_link_libraries(mygl PRIVATE
   glad
   glfw
-  OpenGL::OpenGL
   glm::glm
-  pybind11::embed
 )
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(mygl PRIVATE OpenGL::OpenGL)
+endif()
 
 if(UNIX AND NOT APPLE)
     target_link_libraries(mygl PRIVATE dl)
