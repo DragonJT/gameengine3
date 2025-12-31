@@ -10,38 +10,100 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
-#include <type_traits>
+
+#include <tuple>
+#include <cctype>
+
+static int fix_obj_index(int idx, int count) {
+    // OBJ:  1..count  (positive)
+    //       -1..-count (negative, relative to end)
+    // We return 0-based index, or -1 if invalid/zero.
+    if (idx > 0) return idx - 1;
+    if (idx < 0) return count + idx;   // e.g. -1 => last element
+    return -1;
+}
 
 static std::vector<float> load_obj(const std::string& path)
 {
-    std::vector<float> out;   // flat list: px py pz nx ny nz
-    std::vector<std::array<float, 3>> verts;
-    std::vector<std::array<float, 3>> norms;
+    std::vector<float> out;   // flat list: px py pz nx ny nz, triangulated
+    std::vector<float> verts; // flat xyzxyz...
+    std::vector<float> norms; // flat xyzxyz...
 
     std::ifstream file(path);
     if (!file.is_open()) {
-        std::cerr << "Failed to open OBJ file: " << path << std::endl;
+        std::cerr << "Failed to open OBJ file: " << path << "\n";
         return out;
     }
+
+    auto parse_tok = [&](const std::string& t) -> std::pair<int,int> {
+        // returns (vi, ni) as 0-based indices; ni = -1 if missing
+        int vi_raw = 0, ni_raw = 0;
+
+        // Token formats:
+        // v
+        // v/vt
+        // v//vn
+        // v/vt/vn
+        //
+        // We only care about v and vn.
+        size_t s1 = t.find('/');
+        if (s1 == std::string::npos) {
+            vi_raw = std::stoi(t);
+        } else {
+            vi_raw = std::stoi(t.substr(0, s1));
+
+            size_t s2 = t.find('/', s1 + 1);
+            if (s2 != std::string::npos) {
+                // there is a vn field (maybe empty between //)
+                if (s2 + 1 < t.size()) {
+                    std::string vn_part = t.substr(s2 + 1);
+                    if (!vn_part.empty())
+                        ni_raw = std::stoi(vn_part);
+                }
+            }
+            // if only v/vt, no normal
+        }
+
+        int vcount = static_cast<int>(verts.size() / 3);
+        int ncount = static_cast<int>(norms.size() / 3);
+
+        int vi = fix_obj_index(vi_raw, vcount);
+        int ni = (ni_raw != 0) ? fix_obj_index(ni_raw, ncount) : -1;
+
+        return {vi, ni};
+    };
 
     std::string line;
     while (std::getline(file, line)) {
         if (line.empty() || line[0] == '#')
             continue;
 
-        std::istringstream iss(line);
+        // trim leading whitespace
+        size_t start = 0;
+        while (start < line.size() && std::isspace(static_cast<unsigned char>(line[start])))
+            ++start;
+        if (start >= line.size() || line[start] == '#')
+            continue;
+
+        std::istringstream iss(line.substr(start));
         std::string type;
         iss >> type;
 
         if (type == "v") {
             float x, y, z;
-            iss >> x >> y >> z;
-            verts.push_back({x, y, z});
+            if (iss >> x >> y >> z) {
+                verts.push_back(x);
+                verts.push_back(y);
+                verts.push_back(z);
+            }
         }
         else if (type == "vn") {
             float x, y, z;
-            iss >> x >> y >> z;
-            norms.push_back({x, y, z});
+            if (iss >> x >> y >> z) {
+                norms.push_back(x);
+                norms.push_back(y);
+                norms.push_back(z);
+            }
         }
         else if (type == "f") {
             std::vector<std::string> face;
@@ -52,50 +114,37 @@ static std::vector<float> load_obj(const std::string& path)
             if (face.size() < 3)
                 continue;
 
-            auto parse_tok = [](const std::string& t) {
-                int vi = -1;
-                int ni = -1;
-
-                std::stringstream ss(t);
-                std::string part;
-
-                std::getline(ss, part, '/');
-                vi = std::stoi(part) - 1;
-
-                // skip vt
-                if (std::getline(ss, part, '/')) {
-                    if (std::getline(ss, part, '/')) {
-                        if (!part.empty())
-                            ni = std::stoi(part) - 1;
-                    }
-                }
-                return std::pair<int, int>(vi, ni);
-            };
-
+            // fan triangulation: (0, i, i+1)
             auto [v0i, n0i] = parse_tok(face[0]);
+            if (v0i < 0) continue;
 
-            // triangulate using fan method
             for (size_t i = 1; i + 1 < face.size(); ++i) {
                 auto [v1i, n1i] = parse_tok(face[i]);
                 auto [v2i, n2i] = parse_tok(face[i + 1]);
+                if (v1i < 0 || v2i < 0) continue;
 
-                int vis[3] = {v0i, v1i, v2i};
-                int nis[3] = {n0i, n1i, n2i};
+                const int vis[3] = { v0i, v1i, v2i };
+                const int nis[3] = { n0i, n1i, n2i };
 
                 for (int k = 0; k < 3; ++k) {
-                    const auto& p = verts[vis[k]];
-                    float nx = 0.f, ny = 0.f, nz = 0.f;
+                    int vo = vis[k] * 3;
+                    float px = verts[vo + 0];
+                    float py = verts[vo + 1];
+                    float pz = verts[vo + 2];
 
-                    if (nis[k] >= 0 && nis[k] < (int)norms.size()) {
-                        const auto& n = norms[nis[k]];
-                        nx = n[0];
-                        ny = n[1];
-                        nz = n[2];
+                    float nx = 0.f, ny = 0.f, nz = 0.f;
+                    if (nis[k] >= 0) {
+                        int no = nis[k] * 3;
+                        if (no + 2 < (int)norms.size()) {
+                            nx = norms[no + 0];
+                            ny = norms[no + 1];
+                            nz = norms[no + 2];
+                        }
                     }
 
-                    out.push_back(p[0]);
-                    out.push_back(p[1]);
-                    out.push_back(p[2]);
+                    out.push_back(px);
+                    out.push_back(py);
+                    out.push_back(pz);
                     out.push_back(nx);
                     out.push_back(ny);
                     out.push_back(nz);
