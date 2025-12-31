@@ -1,10 +1,6 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
-#include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtc/type_ptr.hpp>
-
 #include <string>
 #include <vector>
 #include <fstream>
@@ -16,6 +12,7 @@
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_opengl3.h>
 #include <ImGuizmo.h>
+#include "orbitcamera.h"
 
 static int fix_obj_index(int idx, int count) {
     // OBJ:  1..count  (positive)
@@ -237,13 +234,9 @@ struct SceneFBO {
 struct Scene{
     GLuint prog;
     std::vector<RenderObj> renderObjs;
-    glm::vec3 camPos;
-    glm::vec3 camTarget;
-    glm::vec3 camUp;
+    OrbitCamera orbitCamera;
     glm::vec3 lightPos;
     glm::vec3 animLight;
-    glm::mat4 view;
-    glm::mat4 proj;
 };
 
 static void create_render_object(Scene *scene, std::string modelPath, glm::mat4 model, glm::vec3 color){
@@ -312,6 +305,7 @@ static glm::mat4 trs(glm::vec3 position, float angleRadians, glm::vec3 scale){
 static void create_scene(Scene* scene){
     scene->prog = createProgram("assets/shaders/lit_shader.vs", "assets/shaders/lit_shader.fs");
 
+    orbitcamera_initialize(&scene->orbitCamera);
     create_render_object(
         scene,
         "assets/models/Planet.obj",
@@ -330,8 +324,6 @@ static void create_scene(Scene* scene){
         trs(glm::vec3(0.0,-0.6,0.0), 0, glm::vec3(0.2,0.2,0.2)),
         glm::vec3(0.2f, 0.9f, 0.2f));
 
-    scene->camTarget = glm::vec3(0.0f, 0.0f, 0.0f);
-    scene->camUp = glm::vec3(0.0f, 1.0f, 0.0f);
     scene->lightPos = glm::vec3(1.2f, 1.5f, 1.0f);
 }
 
@@ -392,8 +384,11 @@ static void RenderSceneToFBO(SceneFBO *s, Scene *scene)
 
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+    glm::vec3 camPos = orbitcamera_position(&scene->orbitCamera);
+    glm::mat4 view = orbitcamera_view(&scene->orbitCamera);
+    glm::mat4 proj = orbitcamera_proj(&scene->orbitCamera);
     for(int i = 0; i < scene->renderObjs.size(); i++){
-        render_object(&scene->renderObjs[i], scene->view, scene->proj, scene->animLight, scene->camPos);
+        render_object(&scene->renderObjs[i], view, proj, scene->animLight, camPos);
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
@@ -483,9 +478,11 @@ static void RenderImGuiFrame(GLFWwindow* window, Scene *scene, SceneFBO *s)
         ImGui::GetWindowHeight()
     );
 
+    glm::mat4 view = orbitcamera_view(&scene->orbitCamera);
+    glm::mat4 proj = orbitcamera_proj(&scene->orbitCamera);
     ImGuizmo::Manipulate(
-        glm::value_ptr(scene->view),
-        glm::value_ptr(scene->proj),
+        glm::value_ptr(view),
+        glm::value_ptr(proj),
         ImGuizmo::TRANSLATE,
         ImGuizmo::LOCAL,
         glm::value_ptr(scene->renderObjs[0].model)
@@ -508,6 +505,7 @@ static void RenderImGuiFrame(GLFWwindow* window, Scene *scene, SceneFBO *s)
 
 }
 
+double lastXPos = 0, lastYPos = 0;
 int main() {
   glfwSetErrorCallback(glfw_error_callback);
   if (!glfwInit()) return 1;
@@ -559,14 +557,26 @@ int main() {
     if(glfwGetKey(window, GLFW_KEY_RIGHT)){
         rotation += 0.01;
     }
+    double xpos, ypos;
+    glfwGetCursorPos(window, &xpos, &ypos);
+
+    if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
+    {
+        orbitcamera_rotate(&scene.orbitCamera, xpos - lastXPos, -(ypos - lastYPos));
+    }
+    if(glfwGetKey(window, GLFW_KEY_EQUAL)){
+        orbitcamera_zoom(&scene.orbitCamera, 0.1);
+    }
+    if(glfwGetKey(window, GLFW_KEY_MINUS)){
+        orbitcamera_zoom(&scene.orbitCamera, -0.1);
+    }
 
     float aspect = (s.h == 0) ? 1.0f : (float)s.w / (float)s.h;
-    scene.camPos = glm::vec3(cos(rotation)*3, 2.2f, sin(rotation)*3);
     scene.animLight = scene.lightPos + glm::vec3(std::cos(t) * 0.4f, 0.0f, std::sin(t) * 0.4f);
-    scene.view = glm::lookAt(scene.camPos, scene.camTarget, scene.camUp);
-    scene.proj = glm::perspective(glm::radians(60.0f), aspect, 0.1f, 100.0f);
 
     RenderImGuiFrame(window, &scene, &s);
+    lastXPos = xpos;
+    lastYPos = ypos;
     glfwSwapBuffers(window);
   }
   delete_scene(&scene);
