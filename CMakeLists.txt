@@ -13,19 +13,32 @@ add_subdirectory(external/glm)
 
 add_executable(mygl src/main.cpp)
 
+set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/external/imgui)
+
+target_sources(mygl PRIVATE
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+
+    ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+)
+
+target_include_directories(mygl PRIVATE
+    ${IMGUI_DIR}
+    ${IMGUI_DIR}/backends
+)
+
 target_link_libraries(mygl PRIVATE
   glad
   glfw
   glm::glm
 )
 
-if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    find_package(OpenGL REQUIRED)
-    target_link_libraries(mygl PRIVATE OpenGL::OpenGL)
-endif()
-
 if(UNIX AND NOT APPLE)
-    target_link_libraries(mygl PRIVATE dl)
+    find_package(X11 REQUIRED)
+    target_link_libraries(mygl PRIVATE X11::X11)
 endif()
 
 add_custom_command(TARGET mygl POST_BUILD

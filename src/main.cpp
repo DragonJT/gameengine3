@@ -13,6 +13,10 @@
 
 #include <tuple>
 #include <cctype>
+#include <imgui.h>
+#include <backends/imgui_impl_glfw.h>
+#include <backends/imgui_impl_opengl3.h>
+#include <GLFW/glfw3.h>
 
 static int fix_obj_index(int idx, int count) {
     // OBJ:  1..count  (positive)
@@ -167,10 +171,6 @@ static void glfw_error_callback(int err, const char* msg) {
   std::cerr << "GLFW error " << err << ": " << msg << "\n";
 }
 
-static void framebuffer_size_callback(GLFWwindow*, int w, int h) {
-  glViewport(0, 0, w, h);
-}
-
 static GLuint compileShader(GLenum type, const char* src) {
   GLuint s = glCreateShader(type);
   glShaderSource(s, 1, &src, nullptr);
@@ -289,6 +289,201 @@ static glm::mat4 trs(glm::vec3 position, float angleRadians, glm::vec3 scale){
     return matrix;
 }
 
+struct SceneFBO {
+    GLuint fbo = 0;
+    GLuint color = 0;
+    GLuint depth = 0;
+    int w = 0, h = 0;
+};
+
+struct Scene{
+    GLuint prog;
+    RenderObj icoSphere;
+    RenderObj funnyThing;
+    RenderObj buildings;
+    glm::vec3 camTarget;
+    glm::vec3 camUp;
+    glm::vec3 lightPos;
+};
+
+static void create_scene(Scene* scene){
+    scene->prog = createProgram("assets/shaders/lit_shader.vs", "assets/shaders/lit_shader.fs");
+    scene->icoSphere = create_render_object(scene->prog, "assets/models/Planet.obj");
+    scene->funnyThing = create_render_object(scene->prog, "assets/models/funnything.obj");
+    scene->buildings = create_render_object(scene->prog, "assets/models/buildings.obj");
+    scene->camTarget = glm::vec3(0.0f, 0.0f, 0.0f);
+    scene->camUp = glm::vec3(0.0f, 1.0f, 0.0f);
+    scene->lightPos = glm::vec3(1.2f, 1.5f, 1.0f);
+}
+
+static void CreateOrResizeSceneFBO(SceneFBO *s, int w, int h)
+{
+    if (w <= 0 || h <= 0) return;
+
+    // if same size and already created, do nothing
+    if (s->fbo != 0 && s->w == w && s->h == h) return;
+
+    // destroy old
+    if (s->depth) glDeleteRenderbuffers(1, &s->depth);
+    if (s->color) glDeleteTextures(1, &s->color);
+    if (s->fbo)   glDeleteFramebuffers(1, &s->fbo);
+
+    s->w = w; s->h = h;
+
+    glGenFramebuffers(1, &s->fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, s->fbo);
+
+    // color texture
+    glGenTextures(1, &s->color);
+    glBindTexture(GL_TEXTURE_2D, s->color);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s->color, 0);
+
+    // depth buffer
+    glGenRenderbuffers(1, &s->depth);
+    glBindRenderbuffer(GL_RENDERBUFFER, s->depth);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, s->depth);
+
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        std::cerr << "Scene FBO incomplete: " << status << "\n";
+    }
+}
+
+static void RenderSceneToFBO(SceneFBO *s, Scene *scene)
+{
+    glBindFramebuffer(GL_FRAMEBUFFER, s->fbo);
+    glViewport(0, 0, s->w, s->h);
+
+    glEnable(GL_DEPTH_TEST);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    glViewport(0, 0, s->w, s->h);
+    float aspect = (s->h == 0) ? 1.0f : (float)s->w / (float)s->h;
+
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    // Animate a little
+    float t = (float)glfwGetTime();
+    glm::vec3 camPos   = glm::vec3(cos(t)*3, 2.2f, sin(t)*3);
+
+    scene->icoSphere.model = trs(glm::vec3(-1.0,0.0,0.0), 0, glm::vec3(0.2,0.2,0.2));
+    scene->icoSphere.objectColor = glm::vec3(0.9f, 0.55f, 0.2f);
+
+    scene->funnyThing.model = trs(glm::vec3(1.0,0.0,0.0), 0, glm::vec3(0.2,0.2,0.2));
+    scene->funnyThing.objectColor = glm::vec3(0.2f, 0.55f, 0.9f);
+
+    scene->buildings.model = trs(glm::vec3(0.0,-0.6,0.0), 0, glm::vec3(0.2,0.2,0.2));
+    scene->buildings.objectColor = glm::vec3(0.2f, 0.9f, 0.2f);
+
+    glm::mat4 view = glm::lookAt(camPos, scene->camTarget, scene->camUp);
+    glm::mat4 proj = glm::perspective(glm::radians(60.0f), aspect, 0.1f, 100.0f);
+    glm::vec3 animLight = scene->lightPos + glm::vec3(std::cos(t) * 0.4f, 0.0f, std::sin(t) * 0.4f);
+
+    render_object(scene->icoSphere, view, proj, animLight, camPos);
+    render_object(scene->funnyThing, view, proj, animLight, camPos);
+    render_object(scene->buildings, view, proj, animLight, camPos);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+static void InitImGui(GLFWwindow* window)
+{
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+
+    // Enable docking + multi-viewport (requires docking branch or new enough ImGui)
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+
+    ImGui::StyleColorsDark();
+
+    ImGui_ImplGlfw_InitForOpenGL(window, true);
+    ImGui_ImplOpenGL3_Init("#version 330");
+}
+
+static void destroyImGui()
+{
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+}
+
+static void RenderImGuiFrame(GLFWwindow* window, Scene *scene, SceneFBO *s)
+{
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+
+    // 1) Create a full-screen dockspace host window
+    ImGuiWindowFlags host_flags =
+        ImGuiWindowFlags_NoDocking |
+        ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoNavFocus;
+
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->WorkPos);
+    ImGui::SetNextWindowSize(viewport->WorkSize);
+    ImGui::SetNextWindowViewport(viewport->ID);
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+
+    ImGui::Begin("DockSpaceHost", nullptr, host_flags);
+    ImGui::PopStyleVar(2);
+
+    ImGuiID dockspace_id = ImGui::GetID("MyDockSpace");
+    ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_PassthruCentralNode);
+    ImGui::End();
+
+    // 2) Normal windows become dockable
+    ImGui::Begin("Scene");
+    ImGui::Text("Hello docking!");
+    ImGui::End();
+
+    ImGui::Begin("Inspector");
+    ImGui::Text("Stuff here...");
+    ImGui::End();
+
+
+    ImGui::Begin("Scene");
+
+    ImVec2 avail = ImGui::GetContentRegionAvail();
+    int w = (int)avail.x;
+    int h = (int)avail.y;
+
+    CreateOrResizeSceneFBO(s, w, h);
+    RenderSceneToFBO(s, scene);
+
+    ImGui::Image((ImTextureID)(intptr_t)s->color, avail, ImVec2(0, 1), ImVec2(1, 0));
+
+    ImGui::End();
+
+    // Render
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+    auto io = ImGui::GetIO();
+    // Multi-viewport support (ONLY if enabled)
+    if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
+        GLFWwindow* backup = glfwGetCurrentContext();
+        ImGui::UpdatePlatformWindows();
+        ImGui::RenderPlatformWindowsDefault();
+        glfwMakeContextCurrent(backup);
+    }
+
+}
+
 int main() {
   glfwSetErrorCallback(glfw_error_callback);
   if (!glfwInit()) return 1;
@@ -298,14 +493,13 @@ int main() {
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
   glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-  GLFWwindow* win = glfwCreateWindow(1280, 720, "Models", nullptr, nullptr);
-  if (!win) {
+  GLFWwindow* window = glfwCreateWindow(1280, 720, "Models", nullptr, nullptr);
+  if (!window) {
     glfwTerminate();
     return 1;
   }
-  glfwMakeContextCurrent(win);
+  glfwMakeContextCurrent(window);
   glfwSwapInterval(1);
-  glfwSetFramebufferSizeCallback(win, framebuffer_size_callback);
 
   if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
     std::cerr << "Failed to init GLAD\n";
@@ -316,56 +510,31 @@ int main() {
 
   glEnable(GL_DEPTH_TEST);
 
-  GLuint prog = createProgram("assets/shaders/lit_shader.vs", "assets/shaders/lit_shader.fs");
-  RenderObj icoSphere = create_render_object(prog, "assets/models/Planet.obj");
-  RenderObj funnyThing = create_render_object(prog, "assets/models/funnything.obj");
-  RenderObj buildings = create_render_object(prog, "assets/models/buildings.obj");
+  SceneFBO s;
+  CreateOrResizeSceneFBO(&s, 1000, 800);
+  Scene scene;
+  create_scene(&scene);
 
-  glUseProgram(prog);
+  glUseProgram(scene.prog);
 
   // Basic “camera”
-  glm::vec3 camTarget = glm::vec3(0.0f, 0.0f, 0.0f);
-  glm::vec3 camUp = glm::vec3(0.0f, 1.0f, 0.0f);
 
-  glm::vec3 lightPos = glm::vec3(1.2f, 1.5f, 1.0f);
+  InitImGui(window);
 
-  while (!glfwWindowShouldClose(win)) {
+  while (!glfwWindowShouldClose(window)) {
     glfwPollEvents();
-    if (glfwGetKey(win, GLFW_KEY_ESCAPE) == GLFW_PRESS)
-      glfwSetWindowShouldClose(win, GLFW_TRUE);
+    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+      glfwSetWindowShouldClose(window, GLFW_TRUE);
 
-    int w, h;
-    glfwGetFramebufferSize(win, &w, &h);
-    float aspect = (h == 0) ? 1.0f : (float)w / (float)h;
-
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-    // Animate a little
-    float t = (float)glfwGetTime();
-    glm::vec3 camPos   = glm::vec3(cos(t)*3, 2.2f, sin(t)*3);
-
-    icoSphere.model = trs(glm::vec3(-1.0,0.0,0.0), 0, glm::vec3(0.2,0.2,0.2));
-    icoSphere.objectColor = glm::vec3(0.9f, 0.55f, 0.2f);
-
-    funnyThing.model = trs(glm::vec3(1.0,0.0,0.0), 0, glm::vec3(0.2,0.2,0.2));
-    funnyThing.objectColor = glm::vec3(0.2f, 0.55f, 0.9f);
-
-    buildings.model = trs(glm::vec3(0.0,-0.6,0.0), 0, glm::vec3(0.2,0.2,0.2));
-    buildings.objectColor = glm::vec3(0.2f, 0.9f, 0.2f);
-
-    glm::mat4 view = glm::lookAt(camPos, camTarget, camUp);
-    glm::mat4 proj = glm::perspective(glm::radians(60.0f), aspect, 0.1f, 100.0f);
-    glm::vec3 animLight = lightPos + glm::vec3(std::cos(t) * 0.4f, 0.0f, std::sin(t) * 0.4f);
-
-    render_object(icoSphere, view, proj, animLight, camPos);
-    render_object(funnyThing, view, proj, animLight, camPos);
-    render_object(buildings, view, proj, animLight, camPos);
-
-    glfwSwapBuffers(win);
+    RenderImGuiFrame(window, &scene, &s);
+    glfwSwapBuffers(window);
   }
-  delete_object(icoSphere);
+  delete_object(scene.icoSphere);
+  delete_object(scene.buildings);
+  delete_object(scene.funnyThing);
+  destroyImGui();
 
-  glfwDestroyWindow(win);
+  glfwDestroyWindow(window);
   glfwTerminate();
   return 0;
 }
